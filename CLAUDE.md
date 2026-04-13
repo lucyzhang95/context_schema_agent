@@ -88,6 +88,13 @@ Calculate the cost of the experiment up front and ask the user to approve a
 certain dollar value to spend. Do not exceed this amount in API queries. Use
 Batch API pricing (50% off) for the estimate.
 
+External benchmarking has a **separate, smaller budget cap**. The user is
+prompted once for a benchmark budget (default 2 USD) when `--benchmark` is set.
+This budget is not drawn from the per-iteration cap. Token consumption: one
+Phase-1 summarization, one Phase-2 population, plus one categorization pass and
+one re-categorization pass per row, plus a single column-mapping call. For a
+10k-node external file this is well under 2 USD on Batch API pricing.
+
 ---
 
 ## Starting schema
@@ -136,11 +143,16 @@ N feeds as input to iteration N+1, creating a chained refinement process.
 ```bash
 python schema_agent.py --mode async --iterations 10
 python schema_agent.py --mode async --iterations 5 --resume
+python schema_agent.py --mode async --iterations 5 --benchmark db/external_protein_nodes.csv
 ```
 
 - `--iterations N` (default 10): number of refinement iterations to run
 - `--mode batch|async` (default batch): API mode for Phase 1 & 2
 - `--resume`: resume from the latest `schema_final_N.json` in `output/archive/`
+- `--benchmark <path>`: after the final iteration, run external node
+  benchmarking against the file at `<path>` (e.g.
+  `db/external_protein_nodes.csv`). Uses the latest `schema_final_K.json`. Does
+  not modify the schema.
 
 ### Per-iteration workflow
 
@@ -198,11 +210,166 @@ lowercase, strip whitespace, replace spaces with underscores. This is handled
 by `normalize_term()` in `schema_tools.py`. Deduplication is applied after
 normalization.
 
+### External node benchmarking
+
+A validation feature that runs an **external node file from a different
+database** through the same outer loop and benchmarks the agent-generated
+context against the database's own annotations. The goal is to measure how
+accurately the pipeline (a) categorizes nodes into entity types, (b) populates
+the 21 novel biological context fields, and (c) agrees with an independent
+source on overlapping fields.
+
+This is a **side-car validation feature**. It does not modify the schema, does
+not feed back into vocabulary refinement, and does not consume the
+per-iteration budget unless explicitly enabled.
+
+#### Inputs
+
+External node files live in `db/` and must contain at minimum an identifier
+column and a name column. They may carry any number of additional pre-annotated
+context columns — these are the "gold" values used for comparison.
+
+The first benchmark file is `db/external_protein_nodes.csv`:
+
+| Pipeline field | Source column  | Notes                                         |
+|----------------|----------------|-----------------------------------------------|
+| `id`           | `protein`      | UniProtKB accession; not yet normalized       |
+| `name`         | `protein_name` | Primary signal for entity-type categorization |
+
+> **Important:** During entity-type categorization, rely **primarily on
+> `name`**. The `id` column may be inconsistent across external sources at this
+> stage. The `id` is used only as a *reassurance / cross-check* signal in step
+> 2 below. **Never** infer the entity type from the file name itself.
+
+#### Workflow
+
+Let `K+1` denote the run number of the latest finalized schema (same convention
+as the rest of the pipeline). Let `{node_entity}` be the dominant entity type
+detected for the file (e.g. `protein`).
+
+1. **Entity-type categorization (name only).**
+   For every row, classify the node into one of the 9 supported entity types
+   using **only the `name` column** plus the LLM's own knowledge. Do not use
+   the file name, the `id`, or any other column. This is a Phase-1-style Batch
+   API call (`gpt-4o-mini`).
+
+2. **Cross-check with `id`.**
+   Re-run categorization using **both `id` and `name`**. For UniProtKB inputs
+   this means the LLM may resolve the accession to a known protein. Compare
+   the two passes:
+    - Build a reclassification table:
+      `{id, name, type_from_name, type_from_id_and_name, changed: bool, reason}`.
+    - Write `output/archive/external_reclassification_report_(K+1).md`
+      summarizing how many nodes changed type, which directions are most
+      common, and a few representative examples.
+    - The categorization used **downstream** is `type_from_id_and_name`. Report
+      any rows where the two passes disagree as a known caveat in the final
+      benchmark report.
+
+3. **Run the existing outer-loop Phases 1–2 on the external nodes.**
+   Using the latest `schema_final_(K+1).json` from `output/archive/`:
+    - Phase 1 — Summarize each external node (Batch API, `gpt-4o-mini`, ≤1000
+      tokens).
+    - Phase 2 — Populate the 21 novel biological context fields against the
+      loaded schema's controlled vocabularies.
+    - **Skip Phase 3.** Benchmarking does not refine vocabularies.
+    - Persist batch artifacts under `output/batches/` using the existing layout,
+      but with `external_` prefixed to the batch number key (e.g.
+      `phase1_external_batch_001.jsonl`).
+
+4. **Write per-entity output files** to `output/archive/`:
+    - `output/archive/external_nodes_summary_(K+1).md` — coverage stats per
+      field, plus the schema file name used (mirrors `refinement_summary_N.md`
+      format but read-only).
+    - `output/archive/external_{node_entity}_nodes_(K+1).json` — populated nodes
+      (same shape as `nodes_(K+1).json`).
+    - `output/archive/external_{node_entity}_nodes_(K+1).csv` — flattened CSV
+      (lists joined with `|`, nulls preserved as empty cells, same shape as
+      `nodes_(K+1).csv`).
+
+   If a file mixes entity types, write **one set of output files per detected
+   `{node_entity}`**, partitioning the rows accordingly.
+
+5. **Column-name harmonization.**
+   The original `db/external_protein_nodes.csv` carries its own context columns
+   under whatever names the source database uses. These will not match the
+   pipeline's 21 field names.
+    - For each non-id/non-name column in the original file, ask the LLM
+      (`gpt-4o`, single call) to map it to the closest of the 21 schema field
+      names by **reasoning over the column's values**, not just the column
+      name.
+    - Build a mapping table `{original_column → pipeline_field | null}`. Allow
+      many-to-one (collapse multiple source columns into one pipeline field by
+      union) and `null` (no good match).
+    - Apply the mapping to produce a *renamed* copy of the original file:
+      `output/archive/external_{node_entity}_nodes_(K+1)_renamed.csv`. Leave any
+      value with no mapping as `null`. Write the mapping itself to
+      `output/archive/external_{node_entity}_column_mapping_(K+1).json`.
+
+6. **Content comparison.**
+   With both files now sharing column names, compare row-by-row on `id`. See
+   *Benchmark metrics* below for what to compute. Write everything to
+   `output/archive/external_benchmark_report_(K+1).md`.
+
+#### Benchmark metrics
+
+For each of the 21 fields that exists in **both** the agent-generated and the
+harmonized external file, compute and report:
+
+| Metric                              | Why it matters                                                                                                                                                          |
+|-------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Both-populated rate**             | % of rows where both sides have a non-null value. Establishes the comparable subset.                                                                                    |
+| **Both-null rate**                  | % where both sides agree the field is inapplicable. A weak form of agreement.                                                                                           |
+| **Agent-only / external-only rate** | Asymmetry of coverage. Tells you whether the agent over- or under-fills relative to the external source.                                                                |
+| **Jaccard similarity**              | For list-valued fields. `                                                                                                                                               |A ∩ B| / |A ∪ B|` per row, averaged over the both-populated subset.                                                                             |
+| **Set precision / recall / F1**     | Treat external as ground truth, agent values as predictions. Report micro and macro across rows.                                                                        |
+| **Exact-match rate**                | Strict equality of the two sets per row. Sanity check; expected to be low if vocabularies differ.                                                                       |
+| **Cohen's κ (per field)**           | Binarize as "value present" or per-term, depending on field cardinality. Captures agreement above chance.                                                               |
+| **Embedding cosine similarity**     | For terms that don't match exactly, embed both label sets (`text-embedding-3-small`) and compute mean pairwise cosine. Catches `"endothelial_cell"` vs `"endothelium"`. |
+| **Top-K confusion matrix**          | For categorical fields with ≤30 terms, render a confusion matrix of agent label vs external label.                                                                      |
+
+Aggregate these into a single report with three sections:
+
+1. **Coverage agreement** — table of all 21 fields with the four rate columns.
+2. **Content agreement** — table of all 21 fields with Jaccard, F1, κ,
+   embedding cosine.
+3. **Per-field deep dive** — for each field, the top 5 most-disagreeing terms
+   and 2–3 example rows.
+
+The headline number is a single **consistency score**: the macro-average F1
+across all comparable fields, weighted by the both-populated rate. Report it
+in the first line of the report.
+
+#### Plots
+
+All benchmark plots are written to `images/` with the prefix `external_`:
+
+- `images/external_pca_context.png` — PCA of agent-generated context vectors
+  for the external nodes (analogous to `pca_context.png`).
+- `images/external_field_agreement.png` — grouped barplot of the four
+  coverage-rate columns per field.
+- `images/external_f1_by_field.png` — sorted barplot of per-field F1.
+- `images/external_jaccard_distribution.png` — histogram of per-row Jaccard
+  similarities (one panel per field with enough overlap).
+- `images/external_reclassification_sankey.png` — Sankey of
+  `type_from_name → type_from_id_and_name` from step 2.
+
+#### What benchmarking does *not* do
+
+- It does **not** modify or refine the schema.
+- It does **not** update cumulative term frequencies, stability counts, or
+  locked fields.
+- It does **not** affect the per-iteration budget cap unless `--benchmark` is
+  set; the benchmark run is budgeted separately (see *Cost*).
+- It does **not** treat the external file as ground truth in any absolute
+  sense — divergences are a measurement, not a verdict on either side.
+
 ### Budget
 
 The user is prompted **once** for a per-iteration budget cap (in USD). This
 same cap applies independently to each iteration. Total spend =
 per-iteration budget × number of iterations (worst case).
+Total spend should not exceed 20 USD.
 
 #### Refinement summary format
 
@@ -242,6 +409,9 @@ All 21 fields must be listed. If no changes, show "Terms added: none" /
 - Save at least 2 versioned checkpoints before finalizing
 - When calling save_schema or finalize_schema, pass only the `controlled_vocabularies` dict (merged into base schema
   automatically)
+- External benchmarking is **read-only with respect to the schema**. It must
+  not call `save_schema`, `finalize_schema`, or `write_summary`. It writes only
+  `external_*` files.
 
 ---
 
@@ -255,7 +425,7 @@ chains from the previous one's finalized schema.
 **Outer loop** (for iteration i = 1 … I):
 
 1. Load the latest schema from `output/archive/schema_final_K.json` (highest K)
-   and set the output run number to K+1
+   and set the output run number to K+1, put the file name of the latest schema you used in summary report
 2. Select 500 new diverse node IDs (fresh random sample)
 3. **Phase 1 — Summarize** (Batch API or async, gpt-4o-mini):
    a. Build requests — one summarization request per node
@@ -276,8 +446,28 @@ chains from the previous one's finalized schema.
 6. Clean up schema checkpoint intermediates from `output/archive/`
 7. Compare finalized schema to starting schema; update per-field stability
    counts. Lock fields stable for 3+ consecutive iterations.
-8. Output: `schema_final_(K+1).json`, `refinement_summary_(K+1).md`, and
-   `nodes_(K+1).json` in `output/archive/`
+8. Output: `schema_final_(K+1).json`, `refinement_summary_(K+1).md`,
+   `nodes_(K+1).json`, and `nodes_(K+1).csv` in `output/archive/`
+9. **(Optional) External node benchmarking** — only if `--benchmark <path>`
+   was passed and only after the final iteration:
+   a. Categorize each row's entity type from `name` only (Batch API,
+   gpt-4o-mini).
+   b. Re-categorize using `id + name`; write
+   `external_reclassification_report_(K+1).md`.
+   c. Run Phase 1 (summarize) and Phase 2 (populate) against
+   `schema_final_(K+1).json`. Skip Phase 3.
+   d. Write `external_nodes_summary_(K+1).md`,
+   `external_{node_entity}_nodes_(K+1).json`, and
+   `external_{node_entity}_nodes_(K+1).csv` to `output/archive/`.
+   e. Harmonize column names against the original external file via
+   LLM-driven mapping; write
+   `external_{node_entity}_column_mapping_(K+1).json` and
+   `external_{node_entity}_nodes_(K+1)_renamed.csv`.
+   f. Compute benchmark metrics (coverage agreement, Jaccard, F1, Cohen's κ,
+   embedding cosine) and write `external_benchmark_report_(K+1).md`.
+10. **(Optional) Generate external benchmarking plots** with the `external_`
+    prefix (PCA, per-field agreement, F1, Jaccard, reclassification Sankey)
+    into `images/`.
 
 **After final iteration**: generate all plots (PCA, node types, term changes).
 
@@ -341,7 +531,7 @@ Each value in a list must come from the corresponding controlled vocabulary.
 
 The output/archive/nodes_N.csv should be a csv file (dataframe object), each node as row and each with each node as a
 row and each 21 novel biological context field as a column. In case the value is a list, separate each list object
-using "|". Leave the `null` as is.
+using "|". Leave the `null` as in the `nodes_N.json`.
 
 Each column name and row values must come from the corresponding controlled vocabulary.
 
@@ -353,6 +543,8 @@ Each column name and row values must come from the corresponding controlled voca
 - **LLM**: OpenAI API via `openai` Python SDK (synchronous client)
 - **Model**: `gpt-4o-mini` for Phase 1 & 2; `gpt-4o` for Phase 3 agent loop
 - **Batch API**: OpenAI Batch API for Phase 1 and Phase 2 (JSONL upload, poll, download)
+- **Embeddings**: `text-embedding-3-small` via the OpenAI API, used only by
+  the external benchmarking comparator
 - **Validation**: `pydantic` for all structured output
 - **Checkpointing**: write to `output/archive/` after every meaningful step
 - **Environment**: `OPENAI_API_KEY` set in `.env`
@@ -384,12 +576,29 @@ scripts/
     async_tools.py    # async direct-API alternatives to batch_tools (Phase 1 & 2)
     schema_tools.py   # load_latest_schema, save_schema, finalize_schema, write_summary, write_nodes, cleanup_checkpoints
 output/
-  archive/            # all versioned outputs (schema_final_N.json, refinement_summary_N.md, nodes_N.json)
+  archive/            # all versioned outputs (schema_final_N.json, refinement_summary_N.md, nodes_N.json, nodes_N.csv)
+                      # external benchmarking outputs (all prefixed external_):
+                      #   external_nodes_summary_N.md
+                      #   external_{node_entity}_nodes_N.json
+                      #   external_{node_entity}_nodes_N.csv
+                      #   external_{node_entity}_nodes_N_renamed.csv
+                      #   external_{node_entity}_column_mapping_N.json
+                      #   external_reclassification_report_N.md
+                      #   external_benchmark_report_N.md
   batches/
     batch_ids/        # one JSON file per batch submission (batch_id, phase, metadata)
     inputs/           # JSONL files submitted to the Batch API (phase1_batch_001.jsonl, etc.)
-    outputs/          # JSONL files returned by the Batch API (phase1_batch_001_output.jsonl, etc.)
+    outputs/          # JSONL files returned by the Batch API (phase1_batch_001_output.jsonl, etc.) 
+                      # CSV files converted from the JSONL files (phase1_batch_001_output.csv, etc.)
 images/               # ad-hoc plots (PCA, etc.)
+                      # external benchmarking plots (all prefixed external_):
+                      #   external_pca_context.png
+                      #   external_field_agreement.png
+                      #   external_f1_by_field.png
+                      #   external_jaccard_distribution.png
+                      #   external_reclassification_sankey.png
 db/
-  nodes.csv           # source node data (250k nodes, 9 entity types)
+  nodes.csv                   # source node data (250k nodes, 9 entity types)
+  protein_nodes.csv           # test node data (10225 nodes, 1 entity type)
+  external_protein_nodes.csv  # first external benchmark file (UniProtKB-keyed proteins)
 ```
