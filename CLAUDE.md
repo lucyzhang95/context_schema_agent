@@ -231,10 +231,10 @@ context columns — these are the "gold" values used for comparison.
 
 The first benchmark file is `db/external_protein_nodes.csv`:
 
-| Pipeline field | Source column  | Notes                                         |
-|----------------|----------------|-----------------------------------------------|
-| `id`           | `protein`      | UniProtKB accession; not yet normalized       |
-| `name`         | `protein_name` | Primary signal for entity-type categorization |
+| Pipeline field | Source column   | Notes                                         |
+|----------------|-----------------|-----------------------------------------------|
+| `id`           | `protein`       | UniProtKB accession; not yet normalized       |
+| `name`         | `protein_name`  | Primary signal for entity-type categorization |
 
 > **Important:** During entity-type categorization, rely **primarily on
 > `name`**. The `id` column may be inconsistent across external sources at this
@@ -257,35 +257,35 @@ detected for the file (e.g. `protein`).
    Re-run categorization using **both `id` and `name`**. For UniProtKB inputs
    this means the LLM may resolve the accession to a known protein. Compare
    the two passes:
-    - Build a reclassification table:
-      `{id, name, type_from_name, type_from_id_and_name, changed: bool, reason}`.
-    - Write `output/archive/external_reclassification_report_(K+1).md`
-      summarizing how many nodes changed type, which directions are most
-      common, and a few representative examples.
-    - The categorization used **downstream** is `type_from_id_and_name`. Report
-      any rows where the two passes disagree as a known caveat in the final
-      benchmark report.
+   - Build a reclassification table:
+     `{id, name, type_from_name, type_from_id_and_name, changed: bool, reason}`.
+   - Write `output/archive/external_reclassification_report_(K+1).md`
+     summarizing how many nodes changed type, which directions are most
+     common, and a few representative examples.
+   - The categorization used **downstream** is `type_from_id_and_name`. Report
+     any rows where the two passes disagree as a known caveat in the final
+     benchmark report.
 
 3. **Run the existing outer-loop Phases 1–2 on the external nodes.**
    Using the latest `schema_final_(K+1).json` from `output/archive/`:
-    - Phase 1 — Summarize each external node (Batch API, `gpt-4o-mini`, ≤1000
-      tokens).
-    - Phase 2 — Populate the 21 novel biological context fields against the
-      loaded schema's controlled vocabularies.
-    - **Skip Phase 3.** Benchmarking does not refine vocabularies.
-    - Persist batch artifacts under `output/batches/` using the existing layout,
-      but with `external_` prefixed to the batch number key (e.g.
-      `phase1_external_batch_001.jsonl`).
+   - Phase 1 — Summarize each external node (Batch API, `gpt-4o-mini`, ≤1000
+     tokens).
+   - Phase 2 — Populate the 21 novel biological context fields against the
+     loaded schema's controlled vocabularies.
+   - **Skip Phase 3.** Benchmarking does not refine vocabularies.
+   - Persist batch artifacts under `output/batches/` using the existing layout,
+     but with `external_` prefixed to the batch number key (e.g.
+     `phase1_external_batch_001.jsonl`).
 
 4. **Write per-entity output files** to `output/archive/`:
-    - `output/archive/external_nodes_summary_(K+1).md` — coverage stats per
-      field, plus the schema file name used (mirrors `refinement_summary_N.md`
-      format but read-only).
-    - `output/archive/external_{node_entity}_nodes_(K+1).json` — populated nodes
-      (same shape as `nodes_(K+1).json`).
-    - `output/archive/external_{node_entity}_nodes_(K+1).csv` — flattened CSV
-      (lists joined with `|`, nulls preserved as empty cells, same shape as
-      `nodes_(K+1).csv`).
+   - `output/archive/external_nodes_summary_(K+1).md` — coverage stats per
+     field, plus the schema file name used (mirrors `refinement_summary_N.md`
+     format but read-only).
+   - `output/archive/external_{node_entity}_nodes_(K+1).json` — populated nodes
+     (same shape as `nodes_(K+1).json`).
+   - `output/archive/external_{node_entity}_nodes_(K+1).csv` — flattened CSV
+     (lists joined with `|`, nulls preserved as empty cells, same shape as
+     `nodes_(K+1).csv`).
 
    If a file mixes entity types, write **one set of output files per detected
    `{node_entity}`**, partitioning the rows accordingly.
@@ -294,17 +294,17 @@ detected for the file (e.g. `protein`).
    The original `db/external_protein_nodes.csv` carries its own context columns
    under whatever names the source database uses. These will not match the
    pipeline's 21 field names.
-    - For each non-id/non-name column in the original file, ask the LLM
-      (`gpt-4o`, single call) to map it to the closest of the 21 schema field
-      names by **reasoning over the column's values**, not just the column
-      name.
-    - Build a mapping table `{original_column → pipeline_field | null}`. Allow
-      many-to-one (collapse multiple source columns into one pipeline field by
-      union) and `null` (no good match).
-    - Apply the mapping to produce a *renamed* copy of the original file:
-      `output/archive/external_{node_entity}_nodes_(K+1)_renamed.csv`. Leave any
-      value with no mapping as `null`. Write the mapping itself to
-      `output/archive/external_{node_entity}_column_mapping_(K+1).json`.
+   - For each non-id/non-name column in the original file, ask the LLM
+     (`gpt-4o`, single call) to map it to the closest of the 21 schema field
+     names by **reasoning over the column's values**, not just the column
+     name.
+   - Build a mapping table `{original_column → pipeline_field | null}`. Allow
+     many-to-one (collapse multiple source columns into one pipeline field by
+     union) and `null` (no good match).
+   - Apply the mapping to produce a *renamed* copy of the original file:
+     `output/archive/external_{node_entity}_nodes_(K+1)_renamed.csv`. Leave any
+     value with no mapping as `null`. Write the mapping itself to
+     `output/archive/external_{node_entity}_column_mapping_(K+1).json`.
 
 6. **Content comparison.**
    With both files now sharing column names, compare row-by-row on `id`. See
@@ -316,17 +316,17 @@ detected for the file (e.g. `protein`).
 For each of the 21 fields that exists in **both** the agent-generated and the
 harmonized external file, compute and report:
 
-| Metric                              | Why it matters                                                                                                                                                          |
-|-------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Both-populated rate**             | % of rows where both sides have a non-null value. Establishes the comparable subset.                                                                                    |
-| **Both-null rate**                  | % where both sides agree the field is inapplicable. A weak form of agreement.                                                                                           |
-| **Agent-only / external-only rate** | Asymmetry of coverage. Tells you whether the agent over- or under-fills relative to the external source.                                                                |
-| **Jaccard similarity**              | For list-valued fields. `                                                                                                                                               |A ∩ B| / |A ∪ B|` per row, averaged over the both-populated subset.                                                                             |
-| **Set precision / recall / F1**     | Treat external as ground truth, agent values as predictions. Report micro and macro across rows.                                                                        |
-| **Exact-match rate**                | Strict equality of the two sets per row. Sanity check; expected to be low if vocabularies differ.                                                                       |
-| **Cohen's κ (per field)**           | Binarize as "value present" or per-term, depending on field cardinality. Captures agreement above chance.                                                               |
-| **Embedding cosine similarity**     | For terms that don't match exactly, embed both label sets (`text-embedding-3-small`) and compute mean pairwise cosine. Catches `"endothelial_cell"` vs `"endothelium"`. |
-| **Top-K confusion matrix**          | For categorical fields with ≤30 terms, render a confusion matrix of agent label vs external label.                                                                      |
+| Metric                              | Why it matters                                                                                                                                                            |
+|-------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Both-populated rate**             | % of rows where both sides have a non-null value. Establishes the comparable subset.                                                                                      |
+| **Both-null rate**                  | % where both sides agree the field is inapplicable. A weak form of agreement.                                                                                             |
+| **Agent-only / external-only rate** | Asymmetry of coverage. Tells you whether the agent over- or under-fills relative to the external source.                                                                  |
+| **Jaccard similarity**              | For list-valued fields. `|A ∩ B| / |A ∪ B|` per row, averaged over the both-populated subset.                                                                             |
+| **Set precision / recall / F1**     | Treat external as ground truth, agent values as predictions. Report micro and macro across rows.                                                                          |
+| **Exact-match rate**                | Strict equality of the two sets per row. Sanity check; expected to be low if vocabularies differ.                                                                         |
+| **Cohen's κ (per field)**           | Binarize as "value present" or per-term, depending on field cardinality. Captures agreement above chance.                                                                 |
+| **Embedding cosine similarity**     | For terms that don't match exactly, embed both label sets (`text-embedding-3-small`) and compute mean pairwise cosine. Catches `"endothelial_cell"` vs `"endothelium"`.   |
+| **Top-K confusion matrix**          | For categorical fields with ≤30 terms, render a confusion matrix of agent label vs external label.                                                                       |
 
 Aggregate these into a single report with three sections:
 
@@ -353,6 +353,54 @@ All benchmark plots are written to `images/` with the prefix `external_`:
   similarities (one panel per field with enough overlap).
 - `images/external_reclassification_sankey.png` — Sankey of
   `type_from_name → type_from_id_and_name` from step 2.
+
+#### What benchmarking does
+
+- **Measures entity-type categorization accuracy** in two passes (name-only,
+  then name+id), and quantifies how often the `id` signal flips the answer —
+  which doubles as a data-quality probe on the external source's `name`
+  column.
+- **Exercises the current finalized schema on out-of-distribution nodes** —
+  nodes the refinement loop has never seen, from a database the loop has
+  never touched. This is the closest thing to a held-out test set the
+  pipeline has.
+- **Produces a single headline number** (the consistency score:
+  coverage-weighted macro-F1 across comparable fields) so schema quality can
+  be tracked across runs with one scalar.
+- **Quantifies coverage asymmetry per field** — whether the agent over-fills,
+  under-fills, or matches the external source. This tells you which of the 21
+  fields the pipeline is genuinely adding signal to versus which ones are
+  weaker than what's already in public DBs.
+- **Catches semantic-equivalent-but-lexically-different terms** via embedding
+  cosine (`endothelial_cell` ≈ `endothelium`), so vocabulary drift between
+  sources doesn't get scored as disagreement.
+- **Builds an LLM-mediated column-name mapping** between the external source's
+  schema and the pipeline's 21 fields, and persists that mapping as a
+  reusable artifact (`external_{node_entity}_column_mapping_N.json`) — so the
+  next benchmark run against the same source is cheaper and reproducible.
+- **Partitions mixed-entity files automatically** into one set of
+  `external_{node_entity}_*` outputs per detected type, so the same code path
+  works for protein files, metabolite files, pathway files, etc. without
+  special-casing.
+- **Persists a reclassification audit trail**
+  (`external_reclassification_report_N.md`) so any downstream weirdness in
+  the populated nodes can be traced back to a categorization decision.
+- **Reuses the existing batch infrastructure** (`output/batches/`, JSONL
+  inputs/outputs, batch_ids) with an `external_` prefix, so all the cost
+  accounting, retry logic, and artifact persistence already in place apply
+  unchanged.
+- **Runs under a separate, smaller budget cap** (default 2 USD), so an
+  accidental `--benchmark` flag can't burn through the iteration budget.
+- **Emits five `external_`-prefixed plots** (PCA, field agreement, F1-by-field,
+  Jaccard distribution, reclassification Sankey) that are visually
+  distinguishable from the main pipeline plots in the same `images/`
+  directory.
+- **Provides a per-field deep dive** in the report (top 5 most-disagreeing
+  terms + 2–3 example rows per field), so when a field scores badly you can
+  immediately see *why* without re-running anything.
+- **Establishes a reproducible comparison protocol** that generalizes — once
+  it works for `external_protein_nodes.csv`, the same workflow runs against
+  any future `db/external_*_nodes.csv` with no code changes.
 
 #### What benchmarking does *not* do
 
