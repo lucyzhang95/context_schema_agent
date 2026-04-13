@@ -286,8 +286,7 @@ chains from the previous one's finalized schema.
 - `save_schema(controlled_vocabularies, version)` — checkpoint to `output/archive/` (vocabs are merged into base schema
   automatically)
 - `finalize_schema(controlled_vocabularies)` — saves `schema_final_N.json` in archive, and converts
-  `schema_final_N.json` to `schema_final_N.csv` with each node as a row and each 21 novel biological context field as a
-  column, ends session (vocabs merged automatically)
+  `schema_final_N.json` to `schema_final_N.csv`, ends session (vocabs merged automatically)
 - `write_summary(content)` — writes `refinement_summary_N.md` in archive
 
 ### Utility functions (used programmatically, not as agent tools)
@@ -339,6 +338,12 @@ belong to multiple categories). Fields that could not be determined are `null`.
 ```
 
 Each value in a list must come from the corresponding controlled vocabulary.
+
+The output/archive/nodes_N.csv should be a csv file (dataframe object), each node as row and each with each node as a
+row and each 21 novel biological context field as a column. In case the value is a list, separate each list object
+using "|". Leave the `null` as is.
+
+Each column name and row values must come from the corresponding controlled vocabulary.
 
 ---
 
