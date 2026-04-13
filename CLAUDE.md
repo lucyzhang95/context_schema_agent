@@ -285,8 +285,9 @@ chains from the previous one's finalized schema.
 
 - `save_schema(controlled_vocabularies, version)` — checkpoint to `output/archive/` (vocabs are merged into base schema
   automatically)
-- `finalize_schema(controlled_vocabularies)` — saves `schema_final_N.json` in archive, ends session (vocabs merged
-  automatically)
+- `finalize_schema(controlled_vocabularies)` — saves `schema_final_N.json` in archive, and converts
+  `schema_final_N.json` to `schema_final_N.csv` with each node as a row and each 21 novel biological context field as a
+  column, ends session (vocabs merged automatically)
 - `write_summary(content)` — writes `refinement_summary_N.md` in archive
 
 ### Utility functions (used programmatically, not as agent tools)
